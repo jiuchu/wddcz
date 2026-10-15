@@ -26,11 +26,10 @@ const BDUSS = process.env.BDUSS;
 const PROBE = process.env.BAIDU_PROBE === '1';
 if (!BDUSS && !PROBE) { console.error('::error::缺少 BDUSS secret'); process.exit(2); }
 
-/* 百度指数 T+1，且按北京时间出账；用 UTC 日期会差一天 */
-function cnYmd(offsetDays) {
-  const d = new Date(Date.now() + offsetDays * 864e5 + 8 * 3600e3);
-  return d.toISOString().slice(0, 10).replace(/-/g, '');
-}
+/* 百度指数 T+1，且按北京时间出账；用 UTC 日期会差一天。
+ * cnDate 给 JSON/前端用（带横杠），cnYmd 给接口参数用（不带）—— 别拿一个比另一个。 */
+const cnDate = o => new Date(Date.now() + o * 864e5 + 8 * 3600e3).toISOString().slice(0, 10);
+const cnYmd = o => cnDate(o).replace(/-/g, '');
 
 function decrypt(ptbk, cipher) {
   const n = ptbk.length >> 1;
@@ -40,6 +39,20 @@ function decrypt(ptbk, cipher) {
   let out = '';
   for (const c of cipher) out += map.has(c) ? map.get(c) : ',';
   return out;
+}
+
+/* 百度官方每天 12~16 时出昨天的数，所以 workflow 一小时跑一次、连跑好几个整点。
+ * 一旦本地这份已经是"昨天"的数，就直接退出：既省一次无头浏览器，
+ * 也避免同一个内容反复 commit 触发 Pages 重建（公开仓库软限制约 10 次/小时）。
+ * 探测模式不跳过，否则没法用同一份文件反复测 IP。 */
+if (!PROBE && fs.existsSync(OUT)) {
+  try {
+    const prev = JSON.parse(fs.readFileSync(OUT, 'utf8'));
+    if (prev.asof === cnDate(-1)) {
+      console.log(`已是最新（asof=${prev.asof}），跳过本次抓取`);
+      process.exit(0);
+    }
+  } catch { /* 文件坏了就重抓 */ }
 }
 
 const browser = await chromium.launch({ args: ['--no-sandbox'] });
