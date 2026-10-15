@@ -47,7 +47,7 @@ jobs:
           BDUSS: ${{ secrets.BDUSS }}
           BAIDU_WORD: 伟大的长征
           BAIDU_DAYS: '90'
-          BAIDU_PROBE: '1'
+          # BAIDU_PROBE: '1'
         run: node fetch_baidu_index.mjs
 
       - name: 提交结果
