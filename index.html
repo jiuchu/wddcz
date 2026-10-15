@@ -369,6 +369,13 @@ footer a:active{transform:translateY(0)}
       <div class="p-note" id="vvNote"></div>
       <div class="rows" id="platRows"></div>
     </div>
+
+    <div class="panel wide">
+      <div class="p-head"><div class="p-title"><i></i>国民搜索热度逐日</div>
+        <div class="p-note" id="baiduNote"></div></div>
+      <div class="chart-box short"><canvas id="baiduChart"></canvas></div>
+      <div class="rows" id="baiduRows"></div>
+    </div>
   </div>
 
   <!-- ===================== SECONDARY ===================== -->
@@ -772,6 +779,7 @@ const CARDS = [
   { k: 'epAvg',     name: '集均播放量',     c: 'var(--ember)',  ico: 'M4 20V8h4v12H4zm6 0V4h4v16h-4zm6 0v-8h4v8h-4z' },
   { k: 'douban',    name: '豆瓣评分',       c: '#3aa1ff',       ico: 'M6 4h12v3H6V4zm1 5h10v2H7V9zm1 5h8v3H8v-3z' },
   { k: 'ky',        name: '酷云实时收视',   c: '#b478ff',       ico: 'M3 5h18v11H3V5zm5 13h8v2H8v-2z' },
+  { k: 'baiduIdx',  name: '百度指数·最新',  c: '#ff8ab7',       ico: 'M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z' },
   { k: 'yestVv',    name: '昨日全天播放',   c: 'var(--gold)',   ico: 'M5 3h14v4a7 7 0 01-14 0V3zm2 12h10v3H7v-3z' }
 ];
 
@@ -798,9 +806,17 @@ function cardVals() {
                 sub: S.kuyun ? esc(S.kuyun.tvn || '') + ' · ' + esc(S.kuyun.time || '') : (src['酷云'] && !src['酷云'].ok ? src['酷云'].msg : '') },
     yestVv:   (() => {
       const yk = ymd(new Date(Date.now() - 864e5)).replace(/-/g, '');
-      const y = buildDaily().find(x => x.showDate === yk);
+      const y = (S.daily || buildDaily()).find(x => x.showDate === yk);
       return y ? { v: +(y.vvCnt / 1e4).toFixed(1), u: '万', sub: '当日累计 ' + wan(y.total) }
                : { v: null, sub: '逐日数据积累中' };
+    })(),
+    baiduIdx: (() => {
+      const r = BAIDU_INDEX.rows;
+      if (!r.length) return { v: null, sub: '暂无快照' };
+      const last = r[r.length - 1], prev = r.length > 1 ? r[r.length - 2] : null;
+      return { v: last[1], d: prev ? last[1] - prev[1] : null,
+               dl: prev ? '日环比' : null,
+               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof };
     })()
   };
 }
@@ -1050,6 +1066,80 @@ function barPct(p) {
   return Math.max(3, Math.min(100, h.now / base * 100));
 }
 
+/* GitHub Pages 静态页拿不到实时百度指数：getIndex 除了登录 Cookie 还校验一个由
+   百度风控 SDK(Paris) 现算的 Cipher-Text 请求头，而且响应没有 CORS 头、第三方
+   Cookie 又被浏览器按 Lax 挡在站外，前端无解。
+   所以数据由 .github/workflows/baidu-index.yml 每天在云端真浏览器里重采一次，
+   提交成同目录的 baidu-index.json；下面这个常量只是兜底快照。 */
+let BAIDU_INDEX = {
+  asof: '2026-10-14',
+  rows: [['10-03', 1817], ['10-04', 1896], ['10-05', 2296], ['10-06', 5306],
+         ['10-07', 4346], ['10-08', 6017], ['10-09', 40881], ['10-10', 50871],
+         ['10-11', 40445], ['10-12', 36775], ['10-13', 42674], ['10-14', 43771]]
+};
+const BAIDU_COL = '#ff8ab7';
+let baiduChart = null;
+async function loadBaiduIndex() {
+  try {
+    const r = await fetch('baidu-index.json?ts=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (!j || !Array.isArray(j.rows) || !j.rows.length) throw new Error('文件里没有行');
+    BAIDU_INDEX = { asof: j.asof, rows: j.rows, auto: true, at: j.fetchedAt };
+    mark('百度指数', true);
+  } catch (e) {
+    /* 没有 baidu-index.json（本地 file:// 打开、或 Actions 还没跑过）—— 保持内置快照 */
+  }
+  renderBaiduChart(); renderKPI();
+}
+function renderBaiduChart() {
+  const rows = BAIDU_INDEX.rows;
+  if (!rows.length) return;
+  const peak = rows.reduce((a, b) => b[1] > a[1] ? b : a);
+  const last = rows[rows.length - 1];
+  const jump = rows.findIndex((r, i) => i > 0 && r[1] / rows[i - 1][1] >= 3);
+  document.getElementById('baiduNote').innerHTML =
+    '百度指数 · 全国 · PC+移动 · 日粒度<br>' +
+    (BAIDU_INDEX.auto ? '云端每日自动重采，截至 ' + BAIDU_INDEX.asof
+                      : '人工快照，截至 ' + BAIDU_INDEX.asof) + '（官方每天 12~16 时更新）';
+  const host = document.getElementById('baiduRows');
+  host.innerHTML =
+    row('最新一日', fmt(last[1]) + '　' + last[0]) +
+    row('区间峰值', fmt(peak[1]) + '　' + peak[0]) +
+    (jump > 0 ? row('放量节点', rows[jump][0] + ' 环比 +' +
+      Math.round((rows[jump][1] / rows[jump - 1][1] - 1) * 100) + '%（' +
+      fmt(rows[jump - 1][1]) + ' → ' + fmt(rows[jump][1]) + '）') : '') +
+    row('口径', '搜索指数为百度搜索热度，与平台内播放量不同质，仅作趋势对照');
+  if (baiduChart) baiduChart.destroy();
+  baiduChart = new Chart(document.getElementById('baiduChart'), {
+    type: 'line',
+    data: { labels: rows.map(r => r[0]), datasets: [{
+      label: '搜索指数', data: rows.map(r => r[1]),
+      borderColor: BAIDU_COL, borderWidth: 2.4, tension: .3,
+      pointRadius: 3.5, pointHoverRadius: 6, pointBackgroundColor: '#fff', pointBorderColor: BAIDU_COL,
+      fill: true, backgroundColor: c => {
+        const { ctx, chartArea } = c.chart; if (!chartArea) return 'transparent';
+        const g = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+        g.addColorStop(0, hexA(BAIDU_COL, .26)); g.addColorStop(1, hexA(BAIDU_COL, 0)); return g; }
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 600 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#c8cede', boxWidth: 14, boxHeight: 2, font: { size: 11 } } },
+        tooltip: { backgroundColor: 'rgba(8,9,16,.94)', borderColor: 'rgba(255,255,255,.14)',
+          borderWidth: 1, titleColor: '#ffc861', bodyColor: '#eef1f8', padding: 10, cornerRadius: 8,
+          callbacks: { label: it => ' ' + it.dataset.label + ' ' + fmt(it.parsed.y) } }
+      },
+      scales: {
+        x: { grid: { color: 'rgba(255,255,255,.05)' }, ticks: { color: '#6b7288', font: { size: 10 } } },
+        y: { grid: { color: 'rgba(255,255,255,.05)' }, ticks: { color: '#6b7288', font: { size: 10 },
+          callback: v => fmt(v) } }
+      }
+    }
+  });
+}
+
 /* ============================================================
    灯塔逐日：详情页 SSR 只有「今日实时 + 开播累计」，mtop 逐日接口需要
    _m_h5_tk 签名，GitHub Pages 无法计算。这里用「看板自积累」构建逐日序列：
@@ -1101,7 +1191,9 @@ async function loadDailyVv() {
     vvSource = '灯塔逐日接口';
   } catch (e) { vvSource = '本机积累（' + String(e.message).slice(0, 24) + '）'; }
   if (!daily) { recordVv(); daily = buildDaily(); }
+  S.daily = daily;
   renderVvChart(daily);
+  renderKPI();
   /* 正常走灯塔逐日接口时这行留空。只在退回本机积累时才提示 ——
      那种情况下曲线只是"这台电脑看过的那几天"，不写清楚就是一条假历史。 */
   const localN = Object.keys(vvLocal()).length;
@@ -1228,6 +1320,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') dm.classList
 (async function boot() {
   decorate(); tickCountdown(); setInterval(tickCountdown, 1000);
   renderKPI();
+  renderBaiduChart();
+  loadBaiduIndex();
   await refreshAll();
   every(CONFIG.refresh.dengta, () => safe('灯塔', loadDengta).then(stamp), true);
   liveLoop();
