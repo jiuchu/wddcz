@@ -1,21 +1,21 @@
-# 每天 04:30 UTC（北京 12:30，官方 12~16 时出数之后）跑一次百度指数重采，
-# 成功就把 baidu-index.json 提交回 Pages 仓库。
+# 百度官方每天 12~16 时出昨天的数，且页面自己写着"可能会有延迟"。
+# 所以北京 12:00~18:00 每个整点各跑一次（UTC 04~10），谁先抓到谁提交，
+# 后面的整点会被脚本里的"已是最新"判断直接跳过 —— 公开仓库 Actions 不计分钟，
+# 但每次 commit 会触发一次 Pages 重建，这条跳过就是为了让每天只产生 1 次提交。
 #
-# 前置（都在 GitHub 网页上设，一次性）：
-#   1. 仓库 Settings → Secrets and variables → Actions → New repository secret
-#        名字 BDUSS，值贴你自己的百度 BDUSS
-#   2. 仓库 Settings → Actions → General → Workflow permissions → Read and write
-#      （本文件里的 permissions 已经声明了，但组织级策略可能覆盖它，去网页确认一次最稳）
-#   3. 本文件放在仓库的 .github/workflows/ 下，fetch_baidu_index.mjs 放在仓库根
+# 前置（一次性，都在 GitHub 网页上设）：
+#   1. Settings → Secrets and variables → Actions → New repository secret，名字 BDUSS
+#   2. Settings → Actions → General → Workflow permissions → Read and write
+#   3. 本文件放 .github/workflows/ 下，fetch_baidu_index.mjs 放仓库根
 #
-# 注意：YAML 的注释只能是 # 开头，写成 /* */ 会让整个文件解析失败、
+# 注意：YAML 的注释只能以 # 开头。写成 /* */ 会让整个文件解析失败、
 # GitHub 直接不认这个 workflow（连 Run workflow 按钮都不出现）。
 
 name: baidu-index
 
 on:
   schedule:
-    - cron: '30 4 * * *'
+    - cron: '0 4-10 * * *'
   workflow_dispatch:
 
 permissions:
