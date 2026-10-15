@@ -38,7 +38,7 @@ jobs:
           # 第一次跑先别配 secret，把这行注释去掉做"机房 IP 探测"：
           # 日志出 PROBE OK = 无头浏览器签名被百度接受、Actions 的 IP 干净，再回来配 BDUSS。
           # 出 PROBE FAIL · status=10018 = 机房 IP 被风控，这条路死，退回人工快照。
-          # BAIDU_PROBE: '1'
+           BAIDU_PROBE: '1'
         run: node fetch_baidu_index.mjs
       - name: 提交结果
         run: |
