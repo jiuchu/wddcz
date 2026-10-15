@@ -137,8 +137,9 @@ h1{font-size:clamp(2.3rem,5.4vw,3.6rem);font-weight:800;letter-spacing:.06em;lin
 .c-val .u{font-size:.85rem;font-weight:500;color:var(--dim);letter-spacing:0}
 .c-sub{margin-top:9px;font-size:.78rem;color:var(--dimmer);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .delta{font-weight:700;font-variant-numeric:tabular-nums;padding:2px 7px;border-radius:6px;font-size:.75rem}
-.delta.up{color:#79f2c0;background:rgba(61,220,151,.13)}
-.delta.down{color:#ff9d9d;background:rgba(255,92,92,.13)}
+/* 国内习惯：红涨绿跌（和他看的股市一致）。别按欧美那套反回来。 */
+.delta.up{color:#ff9d9d;background:rgba(255,92,92,.13)}
+.delta.down{color:#79f2c0;background:rgba(61,220,151,.13)}
 .delta.flat{color:var(--dim);background:rgba(255,255,255,.06)}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--dimmer);display:inline-block}
 .dot.live{background:var(--ok);box-shadow:0 0 0 0 rgba(61,220,151,.6);animation:bp 1.9s infinite}
@@ -440,6 +441,7 @@ const CONFIG = {
     iqiyi:   '1jm50v4hx7c'          // 即爱奇艺 tvid
   },
   kuyun: { channel: 'CCTV-1' },     // 酷云 /api/rtepg 按剧名匹配，这里只是备注
+  cctv: { channel: 'cctv1' },       // 央视节目单 api.cntv.cn 的频道号，JSONP 免代理
   updateHour: 20,                   // 每日更新时间（灯塔 playTime）
   // 灯塔 mtop 签名端点（见 worker-mtop.js）。留空或没部署 → 逐日曲线自动退回本机积累模式
   mtop: 'https://proxy.jiuchu.asia/mtop',
@@ -449,7 +451,7 @@ const CONFIG = {
     u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
     u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u)
   ],
-  refresh: { heat: 60e3, dengta: 120e3, live: 1200, douban: 30 * 60e3, kuyun: 5e3 },
+  refresh: { heat: 60e3, dengta: 120e3, live: 1200, douban: 30 * 60e3, kuyun: 5e3, epg: 60e3 },
   donate: 'https://pic.sl.al/gdrive/pic/2025-11-26/fileid_1aPF614Jn4683MxgdV3UiuvN5lKyCLsdE_%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20251125182103_66_269.jpg'
 };
 
@@ -538,7 +540,7 @@ function findKey(node, key, depth = 0) {
    ============================================================ */
 const S = {
   meta: null, hot: null, honor: [], rank: null, play: null,
-  douban: null, kuyun: null,
+  douban: null, kuyun: null, epg: null,
   heat: { iqiyi: null, tencent: null }
 };
 const src = {};   // 每个数据源的加载状态
@@ -757,7 +759,7 @@ function renderWork() {
     row('集数', (d.epCount ? '全 ' + d.epCount + ' 集' : '-') + (d.epInfo ? ' · ' + esc(d.epInfo) : '')) +
     row('播出平台', esc((d.vendors || []).join(' · ') || '-')) +
     row('口碑互动', '短评 ' + fmt(d.cmt || 0) + ' · 剧评 ' + fmt(d.review || 0));
-  document.getElementById('workIntro').textContent = d.intro || '暂无简介';
+  document.getElementById('workIntro').textContent = tidyCjk(d.intro) || '暂无简介';
   if (d.cover && !document.getElementById('poster').src.includes('doubanio')) {
     document.getElementById('poster').dataset.doubanCover = d.cover;
   }
@@ -768,6 +770,9 @@ function renderWork() {
    ============================================================ */const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const row = (k, v) => '<div class="row"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
 const fmt = n => n == null ? '--' : Number(n).toLocaleString('zh-CN');
+/* 豆瓣简介原文里混着"翻越18座大 山""1936年10月 红军"这种汉字间空格，
+   只吃汉字之间的空格/全角空格，\n 要留着（那是段落分隔，靠 white-space:pre-line 断行）。 */
+const tidyCjk = s => (s || '').replace(/([一-龥])[ \u3000]+(?=[一-龥])/g, '$1');
 const wan = n => n == null ? '--' : (n >= 1e8 ? (n / 1e8).toFixed(2) + ' 亿' : (n / 1e4).toFixed(1) + ' 万');
 
 const CARDS = [
@@ -894,15 +899,117 @@ function renderMeta() {
   if (m.duration) chips.push(`单集 <b>${m.duration}</b> 分钟`);
   document.getElementById('chips').innerHTML = chips.map(c => `<span class="chip">${c}</span>`).join('');
 
-  const done = m.updateEpisode || '';
-  const n = parseInt((done.match(/\d+/) || [0])[0], 10) || 0;
+  renderMarch();
+}
+
+/* ============================================================
+   央视节目单 —— 行军进度以 CCTV-1 实际排播为准
+   ============================================================ */
+/* api.cntv.cn 回 Access-Control-Allow-Origin:*，也不校验 Referer，浏览器能直连，不用挂代理。
+   d 只认 YYYYMMDD（带横杠返回空表），日期一律按北京时区算，过 0 点自动换第二天。 */
+const cnDay = (offset = 0) =>
+  new Date(Date.now() + offset * 864e5 + 8 * 3600e3).toISOString().slice(0, 10).replace(/-/g, '');
+const bjMidnight = t => Math.floor((t + 8 * 3600e3) / 864e5) * 864e5 - 8 * 3600e3;
+const clip = t => (t || '').replace(/\s+/g, '').slice(0, 12);
+
+/* 央视给同一集有两种写法："伟大的长征第13集" 和 "伟大的长征14/60"，都要认；
+   但 "前情提要-伟大的长征-第13集" 不是一集，算进去会虚报进度。 */
+function epItem(x) {
+  const t = (x.title || '').trim();
+  const pre = /前情|提要|看点|花絮/.test(t);
+  const i = pre ? -1 : t.indexOf(CONFIG.title);
+  const m = i < 0 ? null : /(\d+)/.exec(t.slice(i + CONFIG.title.length));
+  return { title: t, n: m ? +m[1] : 0, pre, st: x.startTime * 1000, et: x.endTime * 1000 };
+}
+
+async function epgOf(day) {
+  const url = 'https://api.cntv.cn/epg/getEpgInfoByChannelNew?c=' + CONFIG.cctv.channel +
+    '&serviceId=tvcctv&d=' + day + '&t=json';
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error('节目单 HTTP ' + r.status);
+  const c = (((await r.json()) || {}).data || {})[CONFIG.cctv.channel] || {};
+  const list = (c.list || []).map(epItem);
+  if (!list.length) throw new Error('节目单为空');
+  return list;
+}
+
+const EPG_CACHE = 10 * 60e3;    // 排播一天改不了几回，犯不着按分钟敲央视的接口
+async function loadEpg() {
+  const day = cnDay(0);
+  if (S.epg && S.epg.day === day && Date.now() - S.epg.at < EPG_CACHE) { renderMarch(); return; }
+  const today = await epgOf(day);                    // 今天拉不到就整体失败，交给 mark() 记一笔
+  const soft = p => p.catch(() => []);               // 昨天/明天只是补充，缺了不影响主流程
+  const now = Date.now();
+  const e = { day, at: now, today, next: [], prev: [] };
+  e.next = await soft(epgOf(cnDay(1)));                                  // 明天：给倒计时兜底
+  if (!today.some(x => x.n && x.st <= now)) e.prev = await soft(epgOf(cnDay(-1)));  // 今天还没播 → 往前找最后一集
+  S.epg = e;
+  mark('央视节目单', true);
+  renderMarch();
+}
+
+/* 派生状态每次都用当前时间重算：排播表 10 分钟才拉一次，可"正在播谁"每秒都在变。 */
+const PRIME_FROM = 20 * 3600e3, PRIME_TO = 23 * 3600e3;   // 黄金档窗口（北京时区起算偏移）
+function epgState(now) {
+  const e = S.epg;
+  if (!e) return null;
+  const eps = e.today.filter(x => x.n);
+  const aired = eps.filter(x => x.st <= now);
+  let n = aired.length ? Math.max(...aired.map(x => x.n)) : 0;
+  if (!n) {
+    const p = (e.prev || []).filter(x => x.n);
+    n = p.length ? Math.max(...p.map(x => x.n)) : 0;
+  }
+  const day0 = bjMidnight(now);
+  const paused = !eps.length;
+  /* 整天没本剧时，"今天播的是什么"用黄金档里占时最长的那条——
+     焦点访谈只占五六分钟，把档期吃掉的是《伟大远征》那种整档纪录片。 */
+  let guest = null;
+  if (paused) {
+    const cand = e.today.filter(x => !x.n && !x.pre && x.st < day0 + PRIME_TO && x.et > day0 + PRIME_FROM);
+    cand.sort((a, b) => (b.et - b.st) - (a.et - a.st));
+    guest = cand[0] || null;
+  }
+  // 明天的表也要只认本剧，否则倒计时会倒数到《生活早参考》头上去
+  const upcoming = eps.concat((e.next || []).filter(x => x.n))
+    .filter(x => x.st > now).sort((a, b) => a.st - b.st);
+  const onAir = e.today.find(x => x.st <= now && x.et > now) || null;
+  return {
+    n, paused, guest, next: upcoming[0] || null, onAir,
+    inPrime: now >= day0 + PRIME_FROM && now < day0 + PRIME_TO,
+    pendingToday: eps.some(x => x.st > now)          // 本剧今晚还没播 → 现在占档的才算"插播"
+  };
+}
+
+/* 进度文案（纯算，不碰 DOM，方便单独验） */
+function marchView(now) {
+  const m = S.meta || {};
   const total = m.episodeCnt || 60;
-  document.getElementById('marchText').textContent = done || `已更新 ${n}/${total} 集`;
+  const st = epgState(now);
+  let n = 0, txt = '';
+  if (st && st.n) {                       // 央视排播说话，灯塔那个 updateEpisode 靠边站
+    n = st.n;
+    txt = `更新至 ${n}/${total} 集`;
+    if (st.paused) txt += st.guest ? ` · 今日 CCTV-1 黄金档《${clip(st.guest.title)}》` : ' · 今日 CCTV-1 未排播本剧';
+    // 本剧今晚还没播、此刻占着黄金档的才算插播；播完之后央视接着放晚间新闻，那不算
+    else if (st.inPrime && st.pendingToday && st.onAir && !st.onAir.n && !st.onAir.pre)
+      txt += ` · 正在插播《${clip(st.onAir.title)}》`;
+  } else {
+    txt = m.updateEpisode || '';
+    n = parseInt((txt.match(/\d+/) || [0])[0], 10) || 0;
+    if (!txt) txt = `已更新 ${n}/${total} 集`;
+  }
+  return { n, total, txt };
+}
+
+function renderMarch() {
+  const { n, total, txt } = marchView(Date.now());
+  document.getElementById('marchText').textContent = txt;
   const pct = Math.max(2, Math.min(100, n / total * 100));
   document.getElementById('trackFill').style.width = pct + '%';
   document.getElementById('trackHead').style.left = pct + '%';
   const tr = document.getElementById('track');
-  tr.querySelectorAll('.mile').forEach(e => e.remove());
+  tr.querySelectorAll('.mile').forEach(el => el.remove());
   [25, 50, 75, 100].forEach(p => {
     const d = document.createElement('div');
     d.className = 'mile' + (pct >= p ? ' hit' : '');
@@ -1245,7 +1352,8 @@ async function refreshAll() {
     safe('灯塔', loadDengta),
     safe('剧云录', loadHeatAll),
     safe('豆瓣', loadDouban),
-    safe('酷云', loadKuyun)
+    safe('酷云', loadKuyun),
+    safe('央视节目单', loadEpg)
   ]);
   await loadDailyVv();
   stamp();
@@ -1269,14 +1377,23 @@ function checkNotice() {
   el.classList.add('show');
 }
 
-/* 倒计时：每日 updateHour 更新 */
+/* 倒计时：先倒数到央视节目单里下一集的开播点，拿不到才退回 CONFIG.updateHour 的死规矩。
+   插播纪录片时下一集可能落在明天，所以超过一天要带"天"。 */
 function tickCountdown() {
-  const now = new Date();
-  const next = new Date(now); next.setHours(CONFIG.updateHour, 0, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  const ms = next - now, h = Math.floor(ms / 36e5), m = Math.floor(ms % 36e5 / 6e4), s = Math.floor(ms % 6e4 / 1000);
+  const st = epgState(Date.now());
+  let ms;
+  if (st && st.next) {
+    ms = st.next.st - Date.now();
+  } else {
+    const now = new Date();
+    const next = new Date(now); next.setHours(CONFIG.updateHour, 0, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    ms = next - now;
+  }
+  if (ms < 0) ms = 0;
+  const d = Math.floor(ms / 864e5), h = Math.floor(ms % 864e5 / 36e5), m = Math.floor(ms % 36e5 / 6e4), s = Math.floor(ms % 6e4 / 1000);
   document.getElementById('countdown').textContent =
-    `距下次更新 ${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+    `距下次更新 ${d ? d + '天' : ''}${pad2(h)}:${pad2(m)}:${pad2(s)}`;
 }
 
 /* ============================================================
@@ -1328,6 +1445,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') dm.classList
   every(CONFIG.refresh.heat,   () => safe('剧云录', loadHeatAll).then(stamp), true);
   every(CONFIG.refresh.douban, () => safe('豆瓣', loadDouban));
   every(CONFIG.refresh.kuyun,  () => safe('酷云', loadKuyun), true);
+  // 排播本身 10 分钟才真拉一次（loadEpg 内部有缓存），这一分钟一次只是重算"正在播谁"和跨 0 点换日
+  every(CONFIG.refresh.epg,    () => safe('央视节目单', loadEpg), true);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     renderKPI();
