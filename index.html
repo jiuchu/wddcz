@@ -842,13 +842,12 @@ function cardVals() {
     })(),
     baiduIdx: (() => {
       const r = BAIDU_INDEX.rows;
-      if (!r.length) return { v: null, sub: '暂无快照' };
+      if (!r.length) return { v: null, sub: '暂无数据' };
       const last = r[r.length - 1], prev = r.length > 1 ? r[r.length - 2] : null;
       const lag = baiduLag(BAIDU_INDEX.asof);
       return { v: last[1], d: prev ? last[1] - prev[1] : null,
                dl: prev ? '日环比' : null,
-               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof +
-                    (lag ? ` · 已滞后 ${lag} 天` : ''),
+               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof + (lag ? ` · 已滞后 ${lag} 天` : ''),
                warn: lag > 0 };
     })()
   };
@@ -1201,13 +1200,14 @@ function barPct(p) {
   return Math.max(3, Math.min(100, h.now / base * 100));
 }
 
-/* GitHub Pages 静态页拿不到实时百度指数：getIndex 除了登录 Cookie 还校验一个由
-   百度风控 SDK(Paris) 现算的 Cipher-Text 请求头，而且响应没有 CORS 头、第三方
-   Cookie 又被浏览器按 Lax 挡在站外，前端无解。
-   所以数据由 .github/workflows/baidu-index.yml 每天在云端真浏览器里重采一次，
-   提交成同目录的 baidu-index.json；下面这个常量只是兜底快照。 */
+/* 百度指数在静态页里取不到：getIndex 除了登录 Cookie 还校验一个由百度风控 SDK(Paris)
+   现算的请求头，而且响应没有 CORS 头、第三方 Cookie 又被浏览器按 Lax 挡在站外，前端无解。
+   所以这个数由站外的定时任务每天更新一次，写成同目录的 baidu-index.json；下面这个常量
+   只是取不到时的兜底数据。这条链路怎么跑的不要在界面上写出来；
+   但 auto 标记要露出来 —— 有数据时显示「自动重采」还是「人工快照」，是他确认要留的判据。 */
 let BAIDU_INDEX = {
   asof: '2026-10-14',
+  auto: false,
   rows: [['10-03', 1817], ['10-04', 1896], ['10-05', 2296], ['10-06', 5306],
          ['10-07', 4346], ['10-08', 6017], ['10-09', 40881], ['10-10', 50871],
          ['10-11', 40445], ['10-12', 36775], ['10-13', 42674], ['10-14', 43771]]
@@ -1215,9 +1215,9 @@ let BAIDU_INDEX = {
 const BAIDU_COL = '#ff8ab7';
 let baiduChart = null;
 
-/* 这条链路的失败模式是静默的：Actions 挂了、BDUSS 失效、IP 被风控，页面都会照常
-   显示"自动重采 · 截至 某天"，只有拿手机对一眼才发现。所以按官方口径算出"该有数了没"：
-   12~16 时才出昨天的数，16 点之前缺昨天是正常节奏，不能当故障报。 */
+/* 这类数据的失败是静默的：上游没更新，页面照样显示"截至 某天"，只有拿手机对一眼才发现。
+   所以按官方口径算出"该有数了没"：12~16 时才出昨天的数，16 点之前缺昨天是正常节奏，
+   不能当故障报。 */
 function baiduLag(asof, now = Date.now()) {
   const a = Date.parse((asof || '') + 'T00:00:00Z');
   if (isNaN(a)) return 0;
@@ -1232,10 +1232,10 @@ async function loadBaiduIndex() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     if (!j || !Array.isArray(j.rows) || !j.rows.length) throw new Error('文件里没有行');
-    BAIDU_INDEX = { asof: j.asof, rows: j.rows, auto: true, at: j.fetchedAt };
+    BAIDU_INDEX = { asof: j.asof, rows: j.rows, at: j.fetchedAt, auto: true };
     mark('百度指数', true);
   } catch (e) {
-    /* 没有 baidu-index.json（本地 file:// 打开、或 Actions 还没跑过）—— 保持内置快照 */
+    /* 没有 baidu-index.json（本地 file:// 打开、或还没更新过）—— 保持内置兜底数据 */
   }
   renderBaiduChart(); renderKPI();
 }
@@ -1248,9 +1248,9 @@ function renderBaiduChart() {
   const lag = baiduLag(BAIDU_INDEX.asof);
   document.getElementById('baiduNote').innerHTML =
     '百度指数 · 全国 · PC+移动 · 日粒度<br>' +
-    (BAIDU_INDEX.auto ? '云端每日自动重采，截至 ' + BAIDU_INDEX.asof
-                      : '人工快照，截至 ' + BAIDU_INDEX.asof) + '（官方每天 12~16 时更新）' +
-    (lag ? `<span class="warn"> · 已滞后 ${lag} 天，这条采集可能断了</span>` : '');
+    (BAIDU_INDEX.auto ? '云端每日自动重采，截至 ' : '人工快照，截至 ') + BAIDU_INDEX.asof +
+    '（官方每天 12~16 时更新）' +
+    (lag ? `<span class="warn"> · 已滞后 ${lag} 天</span>` : '');
   const host = document.getElementById('baiduRows');
   host.innerHTML =
     row('最新一日', fmt(last[1]) + '　' + last[0]) +
@@ -1291,7 +1291,7 @@ function renderBaiduChart() {
 
 /* ============================================================
    灯塔逐日：详情页 SSR 只有「今日实时 + 开播累计」，mtop 逐日接口需要
-   _m_h5_tk 签名，GitHub Pages 无法计算。这里用「看板自积累」构建逐日序列：
+   _m_h5_tk 签名，纯静态页算不出来。这里用「看板自积累」构建逐日序列：
    每次刷新把当日的累计值/市占写进 localStorage，相邻两日累计之差即当日新增。
    ============================================================ */
 const VV_KEY = 'cz_vv_hist_v1';
