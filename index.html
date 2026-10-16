@@ -663,12 +663,27 @@ async function loadHeatAll() {
     if (x.r) { S.heat[x.p][x.o === 0 ? 'today' : 'yest'] = x.r; ok++; }
   });
   if (!ok) throw new Error('剧云录无数据');
-  // 当前热度单独取，保证秒级新鲜
+  // 当前热度 + 历史最高一起取：峰值必须问剧云录，见下面那段注释
   for (const p of ['tencent', 'iqiyi']) {
+    const url = a => 'https://juyunlu.top/heat?action=' + a +
+      '&video_id=' + encodeURIComponent(CONFIG.juyunlu[p]) + '&platform=' + p;
+    // 峰值一天最多挪一次，30 分钟问一回就够，别跟着 60 秒的节拍敲代理
+    const needMax = S.heat[p].max == null || Date.now() - (S.heat[p].maxGot || 0) > 30 * 60e3;
     try {
-      const j = await pjson('https://juyunlu.top/heat?action=get_current_heat&video_id=' +
-        encodeURIComponent(CONFIG.juyunlu[p]) + '&platform=' + p);
-      if (j.success) { S.heat[p].cur = +j.heat_value; S.heat[p].curAt = j.record_time; }
+      const [a, b] = await Promise.all([
+        pjson(url('get_current_heat')).catch(() => null),
+        needMax ? pjson(url('get_max_heat')).catch(() => null) : null
+      ]);
+      if (a && a.success) { S.heat[p].cur = +a.heat_value; S.heat[p].curAt = a.record_time; }
+      /* 灯塔那个 maxValue 不能拿来当"历史最高"：它是自己按分钟采的稀疏序列，峰值天生低一截
+         （它报 20,690 / 6,182，剧云录全量库里是 20,828 / 6,190），日期还会算错——
+         它把爱奇艺的纪录标成今天，实际是 10-11 22:20。剧云录读的是 1 分钟粒度的原始库。 */
+      if (b && b.success && b.heat_value != null) {
+        S.heat[p].max = +b.heat_value;
+        S.heat[p].maxGot = Date.now();
+        S.heat[p].maxAt = (b.record_date || '').replace(/-/g, '.') +
+          (b.record_time_only ? ' ' + b.record_time_only : '');
+      }
     } catch (e) {}
   }
   renderHeatChart(); renderKPI();
@@ -793,12 +808,20 @@ function cardVals() {
   const tx = h.tencent || {}, iq = h.iqiyi || {};
   const nowHHMM = pad2(new Date().getHours()) + ':' + pad2(new Date().getMinutes());
   const yTx = atTime(tx.yest?.rec, nowHHMM), yIq = atTime(iq.yest?.rec, nowHHMM);
+  // 历史最高以剧云录为准，灯塔的 maxValue 只在剧云录挂掉时兜底
+  const maxLine = (jy, dt) => {
+    const fromJy = jy.max != null;
+    const v = fromJy ? jy.max : dt?.max;
+    if (!v) return '';
+    const when = (fromJy ? jy.maxAt : dt?.maxDate) || '';
+    return '历史最高 ' + fmt(v) + (when ? ' · ' + when : '');
+  };
   return {
     iqiyiHot: { v: iq.cur ?? S.hot?.iqiyi?.now,
-                sub: S.hot?.iqiyi?.max ? '历史最高 ' + fmt(S.hot.iqiyi.max) + (S.hot.iqiyi.maxDate ? ' · ' + S.hot.iqiyi.maxDate : '') : '',
+                sub: maxLine(iq, S.hot?.iqiyi),
                 d: yIq != null && iq.cur != null ? iq.cur - yIq : null, dl: '较昨日同时段' },
     txHot:    { v: tx.cur ?? S.hot?.tencent?.now,
-                sub: S.hot?.tencent?.max ? '历史最高 ' + fmt(S.hot.tencent.max) + (S.hot.tencent.maxDate ? ' · ' + S.hot.tencent.maxDate : '') : '',
+                sub: maxLine(tx, S.hot?.tencent),
                 d: yTx != null && tx.cur != null ? tx.cur - yTx : null, dl: '较昨日同时段' },
     todayVv:  { v: p.todayVv, u: '万', sub: p.todayRaw ? '原始 ' + fmt(p.todayRaw) : '' },
     totalVv:  { v: p.totalTxt, u: '万', sub: p.totalVv ? '原始 ' + fmt(p.totalVv) : '' },
