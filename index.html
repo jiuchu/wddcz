@@ -136,6 +136,8 @@ h1{font-size:clamp(2.3rem,5.4vw,3.6rem);font-weight:800;letter-spacing:.06em;lin
   font-variant-numeric:tabular-nums;color:var(--txt);display:flex;align-items:baseline;gap:5px}
 .c-val .u{font-size:.85rem;font-weight:500;color:var(--dim);letter-spacing:0}
 .c-sub{margin-top:9px;font-size:.78rem;color:var(--dimmer);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+/* 数据滞后提示用灯塔那个琥珀，别用红——红在这页面上是"涨" */
+.c-sub .warn,.p-note .warn{color:#ffbe6a}
 .delta{font-weight:700;font-variant-numeric:tabular-nums;padding:2px 7px;border-radius:6px;font-size:.75rem}
 /* 国内习惯：红涨绿跌（和他看的股市一致）。别按欧美那套反回来。 */
 .delta.up{color:#ff9d9d;background:rgba(255,92,92,.13)}
@@ -842,9 +844,12 @@ function cardVals() {
       const r = BAIDU_INDEX.rows;
       if (!r.length) return { v: null, sub: '暂无快照' };
       const last = r[r.length - 1], prev = r.length > 1 ? r[r.length - 2] : null;
+      const lag = baiduLag(BAIDU_INDEX.asof);
       return { v: last[1], d: prev ? last[1] - prev[1] : null,
                dl: prev ? '日环比' : null,
-               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof };
+               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof +
+                    (lag ? ` · 已滞后 ${lag} 天` : ''),
+               warn: lag > 0 };
     })()
   };
 }
@@ -882,7 +887,7 @@ function renderKPI() {
       sub += `<span class="delta ${cls}">${ar} ${fmt(Math.abs(Math.round(d.d)))}</span>`;
       if (d.dl) sub += `<span>${esc(d.dl)}</span>`;
     }
-    if (d.sub) sub += `<span>${esc(d.sub)}</span>`;
+    if (d.sub) sub += `<span${d.warn ? ' class="warn"' : ''}>${esc(d.sub)}</span>`;
     se.innerHTML = sub;
   });
 }
@@ -1209,6 +1214,18 @@ let BAIDU_INDEX = {
 };
 const BAIDU_COL = '#ff8ab7';
 let baiduChart = null;
+
+/* 这条链路的失败模式是静默的：Actions 挂了、BDUSS 失效、IP 被风控，页面都会照常
+   显示"自动重采 · 截至 某天"，只有拿手机对一眼才发现。所以按官方口径算出"该有数了没"：
+   12~16 时才出昨天的数，16 点之前缺昨天是正常节奏，不能当故障报。 */
+function baiduLag(asof, now = Date.now()) {
+  const a = Date.parse((asof || '') + 'T00:00:00Z');
+  if (isNaN(a)) return 0;
+  const bj = new Date(now + 8 * 3600e3);
+  const exp = new Date(bj.getTime() + (bj.getUTCHours() >= 16 ? -1 : -2) * 864e5);
+  const e = Date.UTC(exp.getUTCFullYear(), exp.getUTCMonth(), exp.getUTCDate());
+  return Math.max(0, Math.round((e - a) / 864e5));
+}
 async function loadBaiduIndex() {
   try {
     const r = await fetch('baidu-index.json?ts=' + Date.now(), { cache: 'no-store' });
@@ -1228,10 +1245,12 @@ function renderBaiduChart() {
   const peak = rows.reduce((a, b) => b[1] > a[1] ? b : a);
   const last = rows[rows.length - 1];
   const jump = rows.findIndex((r, i) => i > 0 && r[1] / rows[i - 1][1] >= 3);
+  const lag = baiduLag(BAIDU_INDEX.asof);
   document.getElementById('baiduNote').innerHTML =
     '百度指数 · 全国 · PC+移动 · 日粒度<br>' +
     (BAIDU_INDEX.auto ? '云端每日自动重采，截至 ' + BAIDU_INDEX.asof
-                      : '人工快照，截至 ' + BAIDU_INDEX.asof) + '（官方每天 12~16 时更新）';
+                      : '人工快照，截至 ' + BAIDU_INDEX.asof) + '（官方每天 12~16 时更新）' +
+    (lag ? `<span class="warn"> · 已滞后 ${lag} 天，这条采集可能断了</span>` : '');
   const host = document.getElementById('baiduRows');
   host.innerHTML =
     row('最新一日', fmt(last[1]) + '　' + last[0]) +
