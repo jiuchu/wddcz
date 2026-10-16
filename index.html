@@ -453,7 +453,11 @@ const CONFIG = {
     u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
     u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u)
   ],
-  refresh: { heat: 60e3, dengta: 120e3, live: 1200, douban: 30 * 60e3, kuyun: 5e3, epg: 60e3 },
+  /* live/idle 是一对：北京 liveWindow 内按 live 秒级轮，窗口外自动降到 idle。
+     Cloudflare 免费额度 10 万请求/天是整个账号共享的，《嫁金钗》和这些轮询都算在同一份里，
+     之前全程开秒级，一天烧到 9 万直接 1027 停摆。 */
+  refresh: { heat: 60e3, dengta: 120e3, live: 3e3, idle: 60e3, douban: 30 * 60e3, kuyun: 15e3, epg: 60e3 },
+  liveWindow: [18, 24],             // 北京 18:00 ~ 24:00，其余时段数字慢一点没关系
   donate: 'https://pic.sl.al/gdrive/pic/2025-11-26/fileid_1aPF614Jn4683MxgdV3UiuvN5lKyCLsdE_%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20251125182103_66_269.jpg'
 };
 
@@ -655,16 +659,25 @@ async function loadHeat(platform, dayOffset = 0) {
   return { day, rec };
 }
 async function loadHeatAll() {
-  const jobs = ['tencent', 'iqiyi'].flatMap(p => [0, 1].map(o =>
+  /* 昨日曲线是封板的，不会变 —— 4 个平台×日的历史请求里有一半是白敲。
+     只有缓存里的 day 已不再是"昨天"（跨 0 点）或超过 30 分钟，才补取昨日。 */
+  const yDay = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return ymd(d); })();
+  const offs = p => {
+    const h = S.heat[p] || {};
+    return (h.yest && h.yest.day === yDay && Date.now() - (h.yestAt || 0) < 30 * 60e3) ? [0] : [0, 1];
+  };
+  const jobs = ['tencent', 'iqiyi'].flatMap(p => offs(p).map(o =>
     loadHeat(p, o).then(r => ({ p, o, r })).catch(e => ({ p, o, e: String(e.message).slice(0, 40) }))
   ));
   const res = await Promise.all(jobs);
   let ok = 0;
   res.forEach(x => {
     S.heat[x.p] = S.heat[x.p] || {};
-    if (x.r) { S.heat[x.p][x.o === 0 ? 'today' : 'yest'] = x.r; ok++; }
+    if (x.r) { S.heat[x.p][x.o === 0 ? 'today' : 'yest'] = x.r; if (x.o === 1) S.heat[x.p].yestAt = Date.now(); ok++; }
   });
-  if (!ok) throw new Error('剧云录无数据');
+  const cached = ['tencent', 'iqiyi'].some(p =>
+    S.heat[p] && ((S.heat[p].today?.rec.length || 0) + (S.heat[p].yest?.rec.length || 0)));
+  if (!ok && !cached) throw new Error('剧云录无数据');
   // 当前热度 + 历史最高一起取：峰值必须问剧云录，见下面那段注释
   for (const p of ['tencent', 'iqiyi']) {
     const url = a => 'https://juyunlu.top/heat?action=' + a +
@@ -1367,17 +1380,28 @@ function every(ms, fn, runOnReveal = false) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+/* 北京时的小数小时。窗口判断不碰本地 getHours()，浏览器换时区也不会跑偏。 */
+function bjHours(t = Date.now()) {
+  const d = new Date(t + 8 * 3600e3);
+  return d.getUTCHours() + d.getUTCMinutes() / 60;
+}
+const inLiveWindow = (t = Date.now()) =>
+  bjHours(t) >= CONFIG.liveWindow[0] && bjHours(t) < CONFIG.liveWindow[1];
+
 /* 灯塔实时值不走 every()：上游约 1.3 秒跳一格、单次请求 0.5 秒，固定节拍要么堆积要么白等。
    改成"请求落地 → 歇 dwell → 再发"的连续循环，永远只有一个在飞。失败按 3 倍退避到最长 30 秒。
-   窗口失焦时降到 6 秒：Cloudflare 免费额度是 10 万请求/天，一个常开的标签页按 1.2 秒轮询
-   就要吃掉 5 万，而 /dengta、/proxy 这些路由跟 worker 是同一个额度，超了会一起挂。 */
+   秒级只给北京 18–24 这六小时（黄金档 + 当晚热度爬坡），其余时段降到 idle=60 秒：数字还在走，
+   只是不做秒表。一个常开标签页按 1.2 秒轮询要吃掉 5 万请求/天，而 /dengta、/proxy 这些路由跟
+   《嫁金钗》是同一个 Cloudflare 额度（10 万/天），超了会一起挂。页面失焦降到 6 秒。 */
 async function liveLoop() {
   let dwell = CONFIG.refresh.live;
   for (;;) {
     if (document.hidden) { await sleep(1000); continue; }   // 切回前台自动接上，不需要补账
     const ok = await applyDengtaLive();
     stamp();
-    dwell = ok ? (document.hasFocus() ? CONFIG.refresh.live : 6e3) : Math.min(30e3, dwell * 3);
+    if (!ok)                          dwell = Math.min(30e3, dwell * 3);
+    else if (!inLiveWindow())         dwell = CONFIG.refresh.idle;
+    else                              dwell = document.hasFocus() ? CONFIG.refresh.live : 6e3;
     await sleep(dwell);
   }
 }
