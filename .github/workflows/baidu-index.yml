@@ -1,9 +1,14 @@
 # 百度页面写"每天 12~16 时出昨天的数"，但实测会提前：2026-10-16 北京 11:07 时，
 # 10-15 的 44,338 已经在百度自己的图上出来了，而看板还停在 10-14（因为旧排期最早 12:00 才跑）。
-# 所以排成北京 10:00~18:00 每个整点各一次（UTC 02~10），谁先抓到谁提交，
-# 后面的整点会被脚本里的"已是最新"判断直接跳过 —— 公开仓库 Actions 不计分钟，
-# 但每次 commit 会触发一次 Pages 重建，这条跳过就是为了让每天只产生 1 次提交。
-# 另外 GitHub 的 cron 本身在高峰期会迟到十几到几十分钟，多留几个整点也是买这个保险。
+# 脚本里有"已是最新就跳过"的判断，所以谁先抓到谁提交、每天只产生 1 次 commit。
+#
+# ⚠ 2026-10-17：这条 schedule 已经**不干活**了。GitHub 的定时事件从他这个账号整个停了
+#   （jjc / wddcz / TieBaSign 三个仓库 event=schedule 合计只剩 10-08 以前的记录，
+#   手动 workflow_dispatch 一直是好的）。真正每天敲门的是 Cloudflare Worker
+#   shy-salad-5c53 的 Cron Triggers，它 POST dispatches 叫起这条 workflow，
+#   北京 12:10~18:10 每整点十分各一次。
+#   下面的 schedule 只留两次当备份（北京 13:40 / 17:40），故意和主闹钟错开分钟：
+#   同一分钟撞进同一个 concurrency 组会被 cancel-in-progress 把自己掐掉。
 #
 # 前置（一次性，都在 GitHub 网页上设）：
 #   1. Settings → Secrets and variables → Actions → New repository secret，名字 BDUSS
@@ -17,7 +22,7 @@ name: baidu-index
 
 on:
   schedule:
-    - cron: '0 2-10 * * *'
+    - cron: '40 5,9 * * *'
   workflow_dispatch:
 
 permissions:
@@ -38,13 +43,30 @@ jobs:
         with:
           node-version: '22'
 
+      # 先花两秒钟问一句"仓库里这份是不是已经是昨天的数了"，是的话下面三步整个跳过。
+      # 判据和 fetch_baidu_index.mjs:51 那句守卫一模一样：asof == 北京时间的昨天。
+      # ⚠ 要用 BAIDU_PROBE 探测模式时，把下面三处 if 临时删掉 —— 探测模式本来就该每轮真跑。
+      - name: 要不要跑
+        id: need
+        run: |
+          want=$(TZ=Asia/Shanghai date -d "yesterday" +%F)
+          have=$(node -p "try{JSON.parse(require('fs').readFileSync('baidu-index.json','utf8')).asof}catch(e){''}")
+          echo "期望 asof=$want  仓库里=$have"
+          if [ -n "$have" ] && [ "$have" = "$want" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 装 Playwright + Chromium
+        if: steps.need.outputs.skip != 'true'
         run: npm i -D playwright && npx playwright install --with-deps chromium
 
       # 第一次跑先别配 secret，把下面 BAIDU_PROBE 前面的 # 删掉做一次"机房 IP 探测"：
       #   日志出 PROBE OK                  = 无头浏览器签名被百度接受、Actions 的 IP 干净，再回来配 BDUSS
       #   日志出 PROBE FAIL · status=10018 = 机房 IP 被风控，这条路死，退回人工快照
       - name: 抓取
+        if: steps.need.outputs.skip != 'true'
         env:
           BDUSS: ${{ secrets.BDUSS }}
           BAIDU_WORD: 伟大的长征
@@ -53,6 +75,7 @@ jobs:
         run: node fetch_baidu_index.mjs
 
       - name: 提交结果
+        if: steps.need.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
