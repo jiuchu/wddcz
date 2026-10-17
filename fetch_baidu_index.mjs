@@ -130,7 +130,12 @@ try {
   const asof = all.filter(x => x.index > 0).pop().date;
 
   const out = { ok: true, word: WORD, asof, rows, fetchedAt: new Date().toISOString(), region: '全国' };
-  fs.writeFileSync(OUT, JSON.stringify(out));
+  // 百度还没出昨天的数时 asof 会停在更早一天，但 fetchedAt 每次都变。不拦住的话
+  // 每探测一次就是一个 commit、一次 Pages 重建，出数前那一小时能撞满 Pages 的软限制。
+  let prev = '';
+  try { prev = String(JSON.parse(fs.readFileSync(OUT, 'utf8')).asof || ''); } catch { /* 没有或读不懂就照写 */ }
+  if (prev >= out.asof) console.log(`没有新数（百度侧 asof=${out.asof} 未前进），不写文件、不提交`);
+  else fs.writeFileSync(OUT, JSON.stringify(out));
   console.log(`OK  ${out.asof}  非零 ${rows.length} 天  最新 ${rows[rows.length - 1][1]}  ` +
               `峰值 ${Math.max(...rows.map(r => r[1]))}`);
   console.log(JSON.stringify(out));
