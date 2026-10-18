@@ -456,7 +456,7 @@ const CONFIG = {
   /* live/idle 是一对：北京 liveWindow 内按 live 秒级轮，窗口外自动降到 idle。
      Cloudflare 免费额度 10 万请求/天是整个账号共享的，《嫁金钗》和这些轮询都算在同一份里，
      之前全程开秒级，一天烧到 9 万直接 1027 停摆。 */
-  refresh: { heat: 60e3, dengta: 120e3, live: 3e3, idle: 60e3, douban: 30 * 60e3, kuyun: 15e3, epg: 60e3 },
+  refresh: { heat: 60e3, dengta: 120e3, live: 3e3, idle: 15e3, douban: 30 * 60e3, kuyun: 15e3, epg: 60e3 },
   liveWindow: [18, 24],             // 北京 18:00 ~ 24:00，其余时段数字慢一点没关系
   donate: 'https://pic.sl.al/gdrive/pic/2025-11-26/fileid_1aPF614Jn4683MxgdV3UiuvN5lKyCLsdE_%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20251125182103_66_269.jpg'
 };
@@ -573,14 +573,18 @@ async function loadDengta() {
   S.meta = base;
   S.rank = findKey(state, 'rankVO') || null;
   S.honor = hi.map(x => ({ text: (x.simpleContentHtml || x.contentHtml || '').replace(/<[^>]+>/g, ''), date: x.publishTimeStr }));
+  /* 灯塔在累计过亿那一刻把展示单位从「万」切成「亿」，valueUnit.value 变成 "1.08" 这种字符串，
+     而卡片上的「万」字是写死的 —— 于是显示成 1.08 万。这里一律不抄它的展示串，只读 .value 自己除以 1e4。
+     市占那两个字段反过来：它的 .value 是嵌套对象 {value:"0.2277"}，只有 valueUnit.value 是能用的百分数。 */
+  const toWan = x => { const v = +x?.value; return v ? (v / 1e4).toFixed(2) : null; };
   S.play = {
-    todayVv:  play.todayTotalPlayVvCnt?.nowValueWithUnit?.valueUnit?.value   || null,
+    todayVv:  toWan(play.todayTotalPlayVvCnt?.nowValueWithUnit),
     todayRaw: play.todayTotalPlayVvCnt?.nowValueWithUnit?.value             || null,
     totalVv:  play.todayTotalPlayVvCnt?.totalValueWithUnit?.value           || null,
-    totalTxt: play.todayTotalPlayVvCnt?.totalValueWithUnit?.valueUnit?.value|| null,
+    totalTxt: toWan(play.todayTotalPlayVvCnt?.totalValueWithUnit),
     share:    play.todayTotalMarketShare?.nowValueWithUnit?.valueUnit?.value|| null,
     shareMax: play.todayTotalMarketShare?.maxValueWithUnit?.valueUnit?.value|| null,
-    epAvg:    play.episodeAveragePlay?.nowValueWithUnit?.valueUnit?.value   || null,
+    epAvg:    toWan(play.episodeAveragePlay?.nowValueWithUnit),
     epAvgTo:  play.episodeAveragePlay?.fixedDateStr                         || null
   };
   S.hot = {
@@ -1390,9 +1394,9 @@ const inLiveWindow = (t = Date.now()) =>
 
 /* 灯塔实时值不走 every()：上游约 1.3 秒跳一格、单次请求 0.5 秒，固定节拍要么堆积要么白等。
    改成"请求落地 → 歇 dwell → 再发"的连续循环，永远只有一个在飞。失败按 3 倍退避到最长 30 秒。
-   秒级只给北京 18–24 这六小时（黄金档 + 当晚热度爬坡），其余时段降到 idle=60 秒：数字还在走，
-   只是不做秒表。一个常开标签页按 1.2 秒轮询要吃掉 5 万请求/天，而 /dengta、/proxy 这些路由跟
-   《嫁金钗》是同一个 Cloudflare 额度（10 万/天），超了会一起挂。页面失焦降到 6 秒。 */
+   秒级只给北京 18–24 这六小时（黄金档 + 当晚热度爬坡），其余时段降到 idle=15 秒：数字还在走，
+   只是不做秒表。全天开秒表是烧不起的 —— 1.2 秒一轮 = 7.2 万请求/天，而 /dengta、/proxy 这些路由
+   跟《嫁金钗》共用同一个 Cloudflare 额度（10 万/天），10-17 就是这么撞停过。页面失焦降到 6 秒。 */
 async function liveLoop() {
   let dwell = CONFIG.refresh.live;
   for (;;) {
