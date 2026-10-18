@@ -861,11 +861,9 @@ function cardVals() {
       const r = BAIDU_INDEX.rows;
       if (!r.length) return { v: null, sub: '暂无数据' };
       const last = r[r.length - 1], prev = r.length > 1 ? r[r.length - 2] : null;
-      const lag = baiduLag(BAIDU_INDEX.asof);
       return { v: last[1], d: prev ? last[1] - prev[1] : null,
                dl: prev ? '日环比' : null,
-               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof + (lag ? ` · 已滞后 ${lag} 天` : ''),
-               warn: lag > 0 };
+               sub: (BAIDU_INDEX.auto ? '自动重采 · ' : '人工快照 · ') + '截至 ' + BAIDU_INDEX.asof + baiduStamp() };
     })()
   };
 }
@@ -1233,15 +1231,20 @@ const BAIDU_COL = '#ff8ab7';
 let baiduChart = null;
 
 /* 这类数据的失败是静默的：上游没更新，页面照样显示"截至 某天"，只有拿手机对一眼才发现。
-   所以按官方口径算出"该有数了没"：12~16 时才出昨天的数，16 点之前缺昨天是正常节奏，
-   不能当故障报。 */
-function baiduLag(asof, now = Date.now()) {
-  const a = Date.parse((asof || '') + 'T00:00:00Z');
-  if (isNaN(a)) return 0;
-  const bj = new Date(now + 8 * 3600e3);
-  const exp = new Date(bj.getTime() + (bj.getUTCHours() >= 16 ? -1 : -2) * 864e5);
-  const e = Date.UTC(exp.getUTCFullYear(), exp.getUTCMonth(), exp.getUTCDate());
-  return Math.max(0, Math.round((e - a) / 864e5));
+   所以除了"截至哪天"，再露一个"最后一次真去采是几时的"（北京时间月-日 时:分）。
+   这两个各说各的：百度自己没出数时前者停着、后者照走；采集挂了则两个一起冻。
+   内置兜底那份没有采集时间，返回空串、文案自然退回只报"截至"。 */
+function bjStamp(iso) {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const b = new Date(t + 8 * 3600e3);
+  const p = n => String(n).padStart(2, '0');
+  return p(b.getUTCMonth() + 1) + '-' + p(b.getUTCDate()) + ' ' + p(b.getUTCHours()) + ':' + p(b.getUTCMinutes());
+}
+function baiduStamp() {
+  if (!BAIDU_INDEX.auto) return '';
+  const s = bjStamp(BAIDU_INDEX.at);
+  return s ? ' · 最近采集 ' + s : '';
 }
 async function loadBaiduIndex() {
   try {
@@ -1249,7 +1252,7 @@ async function loadBaiduIndex() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     if (!j || !Array.isArray(j.rows) || !j.rows.length) throw new Error('文件里没有行');
-    BAIDU_INDEX = { asof: j.asof, rows: j.rows, at: j.fetchedAt, auto: true };
+    BAIDU_INDEX = { asof: j.asof, rows: j.rows, at: j.lastRun || j.fetchedAt, auto: true };
     mark('百度指数', true);
   } catch (e) {
     /* 没有 baidu-index.json（本地 file:// 打开、或还没更新过）—— 保持内置兜底数据 */
@@ -1262,12 +1265,10 @@ function renderBaiduChart() {
   const peak = rows.reduce((a, b) => b[1] > a[1] ? b : a);
   const last = rows[rows.length - 1];
   const jump = rows.findIndex((r, i) => i > 0 && r[1] / rows[i - 1][1] >= 3);
-  const lag = baiduLag(BAIDU_INDEX.asof);
   document.getElementById('baiduNote').innerHTML =
     '百度指数 · 全国 · PC+移动 · 日粒度<br>' +
     (BAIDU_INDEX.auto ? '云端每日自动重采，截至 ' : '人工快照，截至 ') + BAIDU_INDEX.asof +
-    '（官方每天 12~16 时更新）' +
-    (lag ? `<span class="warn"> · 已滞后 ${lag} 天</span>` : '');
+    '（官方每天 12~16 时更新）' + baiduStamp();
   const host = document.getElementById('baiduRows');
   host.innerHTML =
     row('最新一日', fmt(last[1]) + '　' + last[0]) +
