@@ -129,16 +129,25 @@ try {
   if (!rows.length) throw new Error('全零：BDUSS 可能已失效，或被 10018 风控');
   const asof = all.filter(x => x.index > 0).pop().date;
 
-  const out = { ok: true, word: WORD, asof, rows, fetchedAt: new Date().toISOString(), region: '全国' };
-  // 百度还没出昨天的数时 asof 会停在更早一天，但 fetchedAt 每次都变。不拦住的话
-  // 每探测一次就是一个 commit、一次 Pages 重建，出数前那一小时能撞满 Pages 的软限制。
-  let prev = '';
-  try { prev = String(JSON.parse(fs.readFileSync(OUT, 'utf8')).asof || ''); } catch { /* 没有或读不懂就照写 */ }
-  if (prev >= out.asof) console.log(`没有新数（百度侧 asof=${out.asof} 未前进），不写文件、不提交`);
-  else fs.writeFileSync(OUT, JSON.stringify(out));
-  console.log(`OK  ${out.asof}  非零 ${rows.length} 天  最新 ${rows[rows.length - 1][1]}  ` +
-              `峰值 ${Math.max(...rows.map(r => r[1]))}`);
-  console.log(JSON.stringify(out));
+  const now = new Date().toISOString();
+  const body = { ok: true, word: WORD, asof, rows, fetchedAt: now, region: '全国', lastRun: now };
+  /* 百度还没出昨天的数时 asof 会停在更早一天。以前"asof 未前进就不写文件"，
+     副作用是 fetchedAt 和"我们到底还在不在采"这件事一起冻住了 —— 面板上看不出来。
+     现在数据照旧冻结，只把 lastRun 往前推一格：fetchedAt 是"这份数几时的"，
+     lastRun 是"最后一次真去采是几时的"，两个各说各的。
+     代价：真跑的每一趟一个 commit、一次 Pages 重建。半小时一格摊下来约 2 次/小时，
+     离公共仓库约 10 次/小时的软限制还远；哪天调到 5 分钟要重新算。
+     ⚠ 上面那句"已是最新就跳过"的守卫不动 —— 出数之后的那些格子仍然十几秒收工、不写不提交。 */
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(OUT, 'utf8')); } catch { /* 没有或读不懂就整份照写 */ }
+  if (prev && prev.rows && prev.rows.length && String(prev.asof || '') >= asof) {
+    body.asof = prev.asof; body.rows = prev.rows; body.fetchedAt = prev.fetchedAt || now;
+    console.log(`没有新数（百度侧最新仍是 ${asof}），数据保持 ${body.asof}，只更新 lastRun`);
+  }
+  fs.writeFileSync(OUT, JSON.stringify(body));
+  console.log(`OK  ${asof}  非零 ${rows.length} 天  最新 ${rows[rows.length - 1][1]}  ` +
+              `峰值 ${Math.max(...rows.map(r => r[1]))}  lastRun ${now}`);
+  console.log(JSON.stringify(body));
 } finally {
   await browser.close();
 }
